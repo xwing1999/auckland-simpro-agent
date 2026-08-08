@@ -1,0 +1,16 @@
+{
+  "name": "auckland-simpro-agent",
+  "version": "1.0.0",
+  "description": "Standalone Claude-powered agent for Kiwiseal Auckland franchisor ops data (Simpro Auckland API). Built to run outside Retool's Agent/credit system.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5"
+  }
+}
