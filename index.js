@@ -213,6 +213,106 @@ async function fetchAllVendorOrders() {
   return all;
 }
 
+// ---------------------------------------------------------------------------
+// CUSTOMER LOOKUP — NOT YET CONFIRMED against live Auckland data, unlike
+// everything above. Simpro splits customers into two separate collections
+// (business vs individual) in its documented API — companies/{ID}/customers
+// /companies/ and /individuals/ — this mirrors that, but exactly like the
+// vendorOrders-vs-purchaseOrders guess earlier, the real path/columns need
+// verifying against a live call before this is trusted. First real call IS
+// the test.
+// ---------------------------------------------------------------------------
+async function fetchCustomers(type) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    const res = await simproRequest(`companies/${process.env.SIMPRO_COMPANY_ID}/customers/${type}/`, {
+      pageSize: '100',
+      page: String(page),
+      columns: type === 'companies'
+        ? 'ID,CompanyName,Email,Phone,CellPhone'
+        : 'ID,GivenName,FamilyName,Email,CellPhone,WorkPhone'
+    });
+    const batch = Array.isArray(res) ? res : res.data;
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    all.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+  }
+  return all;
+}
+
+// Compares the last 8 digits only, to dodge +64/0/spacing formatting
+// differences between how Pipely and Simpro store the same phone number.
+function normalizePhone(p) {
+  if (!p) return null;
+  const digits = String(p).replace(/\D/g, '');
+  return digits.length >= 8 ? digits.slice(-8) : digits || null;
+}
+
+async function findCustomersByContact({ phone, email }) {
+  const [companies, individuals] = await Promise.all([
+    fetchCustomers('companies'),
+    fetchCustomers('individuals')
+  ]);
+  const all = [...companies, ...individuals];
+
+  const normTarget = normalizePhone(phone);
+  const emailTarget = email ? String(email).trim().toLowerCase() : null;
+
+  return all.filter((c) => {
+    const candidatePhones = [c.Phone, c.CellPhone, c.WorkPhone].filter(Boolean).map(normalizePhone);
+    const candidateEmail = c.Email ? String(c.Email).trim().toLowerCase() : null;
+    const phoneMatch = normTarget && candidatePhones.includes(normTarget);
+    const emailMatch = emailTarget && candidateEmail === emailTarget;
+    return phoneMatch || emailMatch;
+  }).map((c) => ({
+    id: c.ID,
+    name: c.CompanyName || `${c.GivenName ?? ''} ${c.FamilyName ?? ''}`.trim() || 'Unknown',
+    matchedOn: normTarget && [c.Phone, c.CellPhone, c.WorkPhone].filter(Boolean).map(normalizePhone).includes(normTarget) ? 'phone' : 'email'
+  }));
+}
+
+// Batch, non-chat lookup — deliberately bypasses the Claude/tool loop.
+// Business Brain needs to join potentially dozens of Pipely deals against
+// Simpro customer records; routing that through natural-language questions
+// one deal at a time would be slow and burn tokens for what is really a
+// deterministic join. This does the join in code and returns structured
+// JSON directly.
+async function lookupByContact(contacts) {
+  const results = [];
+  for (const { phone, email } of contacts) {
+    const matchedCustomers = await findCustomersByContact({ phone, email });
+    if (!matchedCustomers.length) {
+      results.push({ phone: phone ?? null, email: email ?? null, matched: false });
+      continue;
+    }
+    const customerIds = matchedCustomers.map((c) => c.id);
+    const [jobs, invoices] = await Promise.all([fetchAllJobs(), fetchAllInvoices()]);
+    const matchedJobs = jobs.filter((j) => customerIds.includes(j.Customer?.ID)).map(shapeJob);
+    const matchedInvoices = invoices.filter((inv) => customerIds.includes(inv.Customer?.ID));
+    const earliestPaidInvoice = matchedInvoices
+      .filter((inv) => inv.IsPaid)
+      .sort((a, b) => (a.DateIssued ?? '').localeCompare(b.DateIssued ?? ''))[0] ?? null;
+
+    results.push({
+      phone: phone ?? null,
+      email: email ?? null,
+      matched: true,
+      matchedOn: matchedCustomers[0].matchedOn,
+      customers: matchedCustomers,
+      jobs: matchedJobs,
+      earliestPaidInvoice: earliestPaidInvoice ? {
+        invoiceId: earliestPaidInvoice.ID,
+        dateIssued: earliestPaidInvoice.DateIssued ?? '',
+        totalIncTax: earliestPaidInvoice.Total?.IncTax ?? 0,
+        jobIds: (earliestPaidInvoice.Jobs || []).map((j) => j.ID)
+      } : null
+    });
+  }
+  return results;
+}
+
 function pnlHealth(marginPct) {
   if (marginPct >= 60) return 'strong';
   if (marginPct >= 40) return 'ok';
@@ -463,6 +563,22 @@ app.post('/chat', async (req, res) => {
   try {
     const result = await runAgent(message, conversationHistory);
     res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Structured, non-chat endpoint for Business Brain's cross-system matching —
+// see lookupByContact() above for why this bypasses the Claude/tool loop.
+app.post('/lookup-by-contact', async (req, res) => {
+  const { contacts } = req.body;
+  if (!Array.isArray(contacts) || contacts.length === 0) {
+    return res.status(400).json({ error: 'contacts (array of {phone, email}) is required' });
+  }
+  try {
+    const results = await lookupByContact(contacts);
+    res.json({ results });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
