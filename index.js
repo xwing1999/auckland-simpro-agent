@@ -231,7 +231,7 @@ async function fetchCustomers(type) {
       page: String(page),
       columns: type === 'companies'
         ? 'ID,CompanyName,Email,Phone,CellPhone'
-        : 'ID,GivenName,FamilyName,Email,CellPhone,WorkPhone'
+        : 'ID,GivenName,FamilyName,Email,Phone,AltPhone,CellPhone'
     });
     const batch = Array.isArray(res) ? res : res.data;
     if (!Array.isArray(batch) || batch.length === 0) break;
@@ -261,7 +261,7 @@ async function findCustomersByContact({ phone, email }) {
   const emailTarget = email ? String(email).trim().toLowerCase() : null;
 
   return all.filter((c) => {
-    const candidatePhones = [c.Phone, c.CellPhone, c.WorkPhone].filter(Boolean).map(normalizePhone);
+    const candidatePhones = [c.Phone, c.CellPhone, c.AltPhone].filter(Boolean).map(normalizePhone);
     const candidateEmail = c.Email ? String(c.Email).trim().toLowerCase() : null;
     const phoneMatch = normTarget && candidatePhones.includes(normTarget);
     const emailMatch = emailTarget && candidateEmail === emailTarget;
@@ -269,7 +269,7 @@ async function findCustomersByContact({ phone, email }) {
   }).map((c) => ({
     id: c.ID,
     name: c.CompanyName || `${c.GivenName ?? ''} ${c.FamilyName ?? ''}`.trim() || 'Unknown',
-    matchedOn: normTarget && [c.Phone, c.CellPhone, c.WorkPhone].filter(Boolean).map(normalizePhone).includes(normTarget) ? 'phone' : 'email'
+    matchedOn: normTarget && [c.Phone, c.CellPhone, c.AltPhone].filter(Boolean).map(normalizePhone).includes(normTarget) ? 'phone' : 'email'
   }));
 }
 
